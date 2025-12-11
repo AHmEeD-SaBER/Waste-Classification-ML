@@ -1,0 +1,38 @@
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Model files (remove if you want to track them)
+models/*.pkl
+models/*.joblib
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (uncomment if dataset is too large)
+# dataset/
+
+# Logs
+*.log
+logs/
+
+# Testing
+.pytest_cache/

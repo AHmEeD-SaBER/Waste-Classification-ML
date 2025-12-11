@@ -1,0 +1,64 @@
+{
+    "dataset": {
+        "path": "./dataset",
+        "classes": {
+            "0": "Glass",
+            "1": "Paper",
+            "2": "Cardboard",
+            "3": "Plastic",
+            "4": "Metal",
+            "5": "Trash",
+            "6": "Unknown"
+        },
+        "train_test_split": 0.2,
+        "augmentation_factor": 0.3
+    },
+    "preprocessing": {
+        "target_size": [
+            224,
+            224
+        ],
+        "normalize": true
+    },
+    "feature_extraction": {
+        "method": "combined",
+        "hog": {
+            "orientations": 9,
+            "pixels_per_cell": [
+                8,
+                8
+            ],
+            "cells_per_block": [
+                2,
+                2
+            ]
+        },
+        "color_histogram": {
+            "bins": 32
+        },
+        "lbp": {
+            "num_points": 24,
+            "radius": 8
+        }
+    },
+    "svm": {
+        "kernel": "rbf",
+        "C": 1.0,
+        "gamma": "scale",
+        "confidence_threshold": 0.7
+    },
+    "knn": {
+        "n_neighbors": 5,
+        "weights": "distance",
+        "metric": "euclidean",
+        "confidence_threshold": 0.6
+    },
+    "evaluation": {
+        "target_accuracy": 0.85
+    },
+    "realtime": {
+        "camera_index": 0,
+        "display_confidence": true,
+        "fps_display": true
+    }
+}
