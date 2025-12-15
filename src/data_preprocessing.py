@@ -43,10 +43,10 @@ def create_augmentation_pipeline():
         A.HorizontalFlip(p=0.5),              # 50% chance to flip horizontally
         A.VerticalFlip(p=0.2),                # 20% chance to flip vertically
         A.Rotate(limit=15, p=0.7),            # Rotate ±15 degrees, 70% chance
-        A.ShiftScaleRotate(                   # Combined shift, scale, rotate
-            shift_limit=0.1,                  # Shift by ±10%
-            scale_limit=0.1,                  # Scale 90%-110%
-            rotate_limit=0,                   # No extra rotation (handled above)
+        A.Affine(                             # Affine transform (replaces ShiftScaleRotate)
+            scale=(0.9, 1.1),                 # Scale 90%-110%
+            translate_percent={"x": (-0.1, 0.1), "y": (-0.1, 0.1)},  # Shift ±10%
+            rotate=0,                         # No extra rotation (handled above)
             p=0.5
         ),
         
@@ -59,7 +59,8 @@ def create_augmentation_pipeline():
         
         # Noise and blur
         A.GaussNoise(
-            var_limit=(10.0, 50.0),           # Add slight noise
+            var_limit=(10, 50),               # Add slight noise (variance range)
+            mean=0,
             p=0.3
         ),
         A.GaussianBlur(

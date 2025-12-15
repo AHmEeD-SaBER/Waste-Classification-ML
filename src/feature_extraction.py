@@ -21,7 +21,9 @@ Suggested Feature Extraction Methods:
 
 import cv2
 import numpy as np
-from skimage.feature import hog, local_binary_pattern
+from skimage.feature import hog, local_binary_pattern, graycomatrix, graycoprops
+from skimage.filters import gabor
+from skimage.measure import moments_hu
 from sklearn.preprocessing import StandardScaler
 
 
@@ -29,13 +31,13 @@ def extract_hog_features(image, orientations=9, pixels_per_cell=(16, 16), cells_
     """
     Extract Histogram of Oriented Gradients features
     
-    OPTIMIZED: Uses larger cells (16x16) to reduce sparsity and feature count
-    while maintaining discriminative power.
+    Captures object edges, reflections, and structure.
+    Uses CLAHE preprocessing to improve edge detection.
     
     Args:
         image: Input image (BGR or grayscale)
         orientations: Number of orientation bins (default: 9)
-        pixels_per_cell: Size of a cell (default: 16x16) - optimized
+        pixels_per_cell: Size of a cell (default: 16x16)
         cells_per_block: Number of cells in each block (default: 2x2)
         
     Returns:
@@ -46,6 +48,11 @@ def extract_hog_features(image, orientations=9, pixels_per_cell=(16, 16), cells_
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
         gray = image
+    
+    # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    # to improve edge detection
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
     
     # Extract HOG features
     features = hog(
@@ -61,56 +68,57 @@ def extract_hog_features(image, orientations=9, pixels_per_cell=(16, 16), cells_
     return features
 
 
-def extract_color_histogram(image, bins=16):
+def extract_color_histogram(image, bins=32):
     """
-    Extract color histogram features from image
+    Extract ENHANCED color histogram features from HSV color space
     
-    OPTIMIZED: Uses fewer bins (16 vs 32) and RGB only to reduce sparsity.
-    Adds mean and std statistics for better discrimination.
+    Enhancements:
+    - Applies contrast enhancement (similar to CLAHE for HOG)
+    - Adds color moments (mean, std, skewness) for better discrimination
+    - Uses HSV for better color representation
     
     Args:
         image: Input image (BGR)
-        bins: Number of bins per channel (default: 16)
+        bins: Number of bins per channel (default: 32)
         
     Returns:
-        feature_vector: 1D numpy array (54 features: 48 histogram + 6 stats)
+        feature_vector: 1D numpy array (96 histogram + 9 moments = 105 features)
     """
-    # Convert BGR to RGB
-    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    # Convert BGR to HSV
+    hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    
+    # Apply histogram equalization to V channel for better contrast
+    hsv_image[:,:,2] = cv2.equalizeHist(hsv_image[:,:,2])
     
     hist_features = []
     
-    # RGB histogram (3 channels × 16 bins = 48 features)
+    # HSV histogram (3 channels × 32 bins = 96 features)
     for i in range(3):
-        hist = cv2.calcHist([rgb_image], [i], None, [bins], [0, 256])
+        hist = cv2.calcHist([hsv_image], [i], None, [bins], [0, 256])
         hist = hist.flatten()
         hist = hist / (hist.sum() + 1e-7)  # Normalize
         hist_features.extend(hist)
     
-    # Add statistical features (6 features)
-    # Mean color per channel (3 features)
-    hist_features.extend([
-        rgb_image[:,:,0].mean() / 255.0,
-        rgb_image[:,:,1].mean() / 255.0,
-        rgb_image[:,:,2].mean() / 255.0
-    ])
-    
-    # Std per channel (3 features) for texture/contrast
-    hist_features.extend([
-        rgb_image[:,:,0].std() / 255.0,
-        rgb_image[:,:,1].std() / 255.0,
-        rgb_image[:,:,2].std() / 255.0
-    ])
+    # Add color moments for each channel (mean, std, skewness)
+    # These capture global color properties
+    for i in range(3):
+        channel = hsv_image[:,:,i].flatten().astype(float)
+        mean = channel.mean() / 255.0
+        std = channel.std() / 255.0
+        skewness = ((channel - channel.mean()) ** 3).mean() / (channel.std() ** 3 + 1e-7)
+        hist_features.extend([mean, std, skewness])
     
     return np.array(hist_features)
 
 
 def extract_lbp_features(image, num_points=24, radius=8):
     """
-    Extract Local Binary Pattern features
+    Extract ENHANCED Local Binary Pattern features
     
-    LBP captures texture patterns, useful for distinguishing surface textures
-    like paper vs plastic vs metal.
+    Enhancements:
+    - Applies CLAHE preprocessing (like HOG) for better texture detection
+    - Uses multi-scale LBP (multiple radii) for richer texture representation
+    - Rotation invariant for robustness
     
     Args:
         image: Input image (grayscale)
@@ -118,7 +126,7 @@ def extract_lbp_features(image, num_points=24, radius=8):
         radius: Radius of circle (default: 8)
         
     Returns:
-        feature_vector: 1D numpy array of LBP histogram
+        feature_vector: 1D numpy array of multi-scale LBP histogram
     """
     # Convert to grayscale if needed
     if len(image.shape) == 3:
@@ -126,41 +134,213 @@ def extract_lbp_features(image, num_points=24, radius=8):
     else:
         gray = image
     
-    # Compute LBP
-    lbp = local_binary_pattern(gray, num_points, radius, method='uniform')
+    # Apply CLAHE preprocessing (same as HOG) for better texture detection
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
     
-    # Compute histogram of LBP
-    n_bins = num_points + 2  # uniform patterns + 2
-    hist, _ = np.histogram(lbp.ravel(), bins=n_bins, range=(0, n_bins))
+    all_hist = []
     
-    # Normalize histogram
-    hist = hist.astype(float)
-    hist = hist / (hist.sum() + 1e-7)
+    # Multi-scale LBP: use different radii to capture textures at different scales
+    # Helps distinguish fine textures (paper) from coarse textures (metal scratches)
+    radii = [1, 3, 8]  # Small, medium, large scale
+    points_list = [8, 16, 24]  # Corresponding points
     
-    return hist
+    for r, p in zip(radii, points_list):
+        # Compute LBP with rotation invariance
+        lbp = local_binary_pattern(gray, p, r, method='uniform')
+        
+        # Compute histogram of LBP
+        n_bins = p + 2  # uniform patterns + 2
+        hist, _ = np.histogram(lbp.ravel(), bins=n_bins, range=(0, n_bins))
+        
+        # Normalize histogram
+        hist = hist.astype(float)
+        hist = hist / (hist.sum() + 1e-7)
+        
+        all_hist.extend(hist)
+    
+    return np.array(all_hist)
+
+
+def extract_gabor_features(image, frequencies=[0.1, 0.2, 0.3], num_orientations=4):
+    """
+    Extract Gabor filter features for texture analysis
+    
+    Gabor filters help distinguish between:
+    - Glass: smooth, reflective textures
+    - Plastic: semi-smooth with slight texture
+    - Metal: reflective with distinct grain patterns
+    
+    Args:
+        image: BGR image (224, 224, 3)
+        frequencies: List of frequencies to analyze
+        num_orientations: Number of orientations (0 to π)
+    
+    Returns:
+        1D feature vector with mean and std of Gabor responses
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    features = []
+    for frequency in frequencies:
+        for theta in np.linspace(0, np.pi, num_orientations, endpoint=False):
+            # Apply Gabor filter
+            real, imag = gabor(gray, frequency=frequency, theta=theta)
+            
+            # Extract statistical features from response
+            features.append(np.mean(real))
+            features.append(np.std(real))
+            features.append(np.mean(np.abs(real)))
+    
+    return np.array(features)
+
+
+def extract_glcm_features(image, distances=[1, 3], angles=[0, np.pi/4, np.pi/2, 3*np.pi/4]):
+    """
+    Extract Gray-Level Co-occurrence Matrix (GLCM) texture features
+    
+    GLCM captures spatial relationships in texture:
+    - Glass: homogeneous, low contrast
+    - Plastic: moderate texture variation  
+    - Metal: higher contrast, more structured patterns
+    
+    Args:
+        image: BGR image (224, 224, 3)
+        distances: Pixel pair distance offsets
+        angles: Pixel pair angles
+    
+    Returns:
+        1D feature vector with GLCM texture properties
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Quantize to 32 levels for faster computation
+    gray = (gray // 8).astype(np.uint8)
+    
+    # Compute GLCM
+    glcm = graycomatrix(gray, distances=distances, angles=angles, 
+                        levels=32, symmetric=True, normed=True)
+    
+    # Extract texture properties
+    features = []
+    properties = ['contrast', 'dissimilarity', 'homogeneity', 'energy', 'correlation']
+    
+    for prop in properties:
+        values = graycoprops(glcm, prop)
+        features.append(np.mean(values))
+        features.append(np.std(values))
+    
+    return np.array(features)
+
+
+def extract_shape_features(image):
+    """
+    Extract Hu moments for shape-invariant features
+    
+    Hu moments are invariant to translation, scale, and rotation.
+    Helps distinguish container shapes across materials.
+    
+    Args:
+        image: BGR image (224, 224, 3)
+    
+    Returns:
+        7 Hu moments
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Threshold to get binary image
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Calculate Hu moments
+    hu = cv2.HuMoments(cv2.moments(binary)).flatten()
+    
+    # Log transform for better scale
+    hu = -np.sign(hu) * np.log10(np.abs(hu) + 1e-10)
+    
+    return hu
+
+
+def extract_edge_features(image):
+    """
+    Extract edge density and sharpness features
+    
+    Edge characteristics differ by material:
+    - Glass: sharp, well-defined edges
+    - Plastic: softer, less defined edges
+    - Metal: sharp edges with distinct boundaries
+    
+    Args:
+        image: BGR image (224, 224, 3)
+    
+    Returns:
+        Edge statistics: density, mean gradient, std gradient
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Compute gradients
+    sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    gradient_magnitude = np.sqrt(sobelx**2 + sobely**2)
+    
+    # Edge density (percentage of strong edges)
+    edge_threshold = np.percentile(gradient_magnitude, 90)
+    edge_density = np.mean(gradient_magnitude > edge_threshold)
+    
+    # Gradient statistics
+    features = [
+        edge_density,
+        np.mean(gradient_magnitude),
+        np.std(gradient_magnitude),
+        np.max(gradient_magnitude),
+        np.percentile(gradient_magnitude, 75),
+        np.percentile(gradient_magnitude, 95)
+    ]
+    
+    return np.array(features)
 
 
 def extract_combined_features(image):
     """
-    Extract and combine multiple feature types
+    Extract and combine OPTIMIZED feature types with balanced weighting
     
-    OPTIMIZED: Combines HOG (shape/edges) and Color features only.
-    LBP removed as it adds too much sparsity without improving accuracy.
+    Removed expensive Gabor and GLCM (slow, minimal accuracy gain)
+    Kept fast, effective features:
+    - HOG: CLAHE + edge detection (~6084 features)
+    - LBP: CLAHE + multi-scale texture (54 features)
+    - Color: Histogram equalization + moments (105 features)
+    - Edge: Density and sharpness (6 features) - FAST
+    - Shape: Hu moments (7 features) - FAST
     
-    Total features: ~630 (576 HOG + 54 Color)
+    Total: ~6256 features (all normalized separately for equal influence)
     
     Args:
         image: Input image (BGR)
         
     Returns:
-        feature_vector: Combined 1D feature vector
+        feature_vector: Combined and balanced 1D feature vector
     """
-    # Extract individual features
+    # Extract optimized features (removed slow Gabor and GLCM)
     hog_features = extract_hog_features(image)
-    color_features = extract_color_histogram(image, bins=16)
+    color_features = extract_color_histogram(image, bins=32)
+    lbp_features = extract_lbp_features(image)
+    shape_features = extract_shape_features(image)
+    edge_features = extract_edge_features(image)
     
-    # Concatenate features (NO LBP)
-    combined = np.concatenate([hog_features, color_features])
+    # Normalize each feature type separately for equal voting power
+    hog_norm = (hog_features - hog_features.mean()) / (hog_features.std() + 1e-7)
+    color_norm = (color_features - color_features.mean()) / (color_features.std() + 1e-7)
+    lbp_norm = (lbp_features - lbp_features.mean()) / (lbp_features.std() + 1e-7)
+    shape_norm = (shape_features - shape_features.mean()) / (shape_features.std() + 1e-7)
+    edge_norm = (edge_features - edge_features.mean()) / (edge_features.std() + 1e-7)
+    
+    # Concatenate: Optimized feature set
+    combined = np.concatenate([
+        hog_norm, 
+        lbp_norm, 
+        color_norm,
+        shape_norm,
+        edge_norm
+    ])
     
     return combined
 
