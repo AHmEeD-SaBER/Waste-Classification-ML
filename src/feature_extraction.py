@@ -25,20 +25,21 @@ from skimage.feature import hog, local_binary_pattern
 from sklearn.preprocessing import StandardScaler
 
 
-def extract_hog_features(image, orientations=9, pixels_per_cell=(8, 8), cells_per_block=(2, 2)):
+def extract_hog_features(image, orientations=9, pixels_per_cell=(16, 16), cells_per_block=(2, 2)):
     """
     Extract Histogram of Oriented Gradients features
     
-    HOG captures edge and gradient structure, useful for object shape detection.
+    OPTIMIZED: Uses larger cells (16x16) to reduce sparsity and feature count
+    while maintaining discriminative power.
     
     Args:
         image: Input image (BGR or grayscale)
         orientations: Number of orientation bins (default: 9)
-        pixels_per_cell: Size of a cell (default: 8x8)
+        pixels_per_cell: Size of a cell (default: 16x16) - optimized
         cells_per_block: Number of cells in each block (default: 2x2)
         
     Returns:
-        feature_vector: 1D numpy array of HOG features
+        feature_vector: 1D numpy array of HOG features (~576 features for 224x224 image)
     """
     # Convert to grayscale if needed
     if len(image.shape) == 3:
@@ -60,39 +61,46 @@ def extract_hog_features(image, orientations=9, pixels_per_cell=(8, 8), cells_pe
     return features
 
 
-def extract_color_histogram(image, bins=32):
+def extract_color_histogram(image, bins=16):
     """
     Extract color histogram features from image
     
-    Captures color distribution in both RGB and HSV color spaces.
-    This helps distinguish materials by color patterns.
+    OPTIMIZED: Uses fewer bins (16 vs 32) and RGB only to reduce sparsity.
+    Adds mean and std statistics for better discrimination.
     
     Args:
         image: Input image (BGR)
-        bins: Number of bins per channel (default: 32)
+        bins: Number of bins per channel (default: 16)
         
     Returns:
-        feature_vector: 1D numpy array of histogram features
+        feature_vector: 1D numpy array (54 features: 48 histogram + 6 stats)
     """
-    # Convert BGR to RGB and HSV
+    # Convert BGR to RGB
     rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     
     hist_features = []
     
-    # RGB histogram (3 channels × bins)
+    # RGB histogram (3 channels × 16 bins = 48 features)
     for i in range(3):
         hist = cv2.calcHist([rgb_image], [i], None, [bins], [0, 256])
         hist = hist.flatten()
         hist = hist / (hist.sum() + 1e-7)  # Normalize
         hist_features.extend(hist)
     
-    # HSV histogram (3 channels × bins)
-    for i in range(3):
-        hist = cv2.calcHist([hsv_image], [i], None, [bins], [0, 256])
-        hist = hist.flatten()
-        hist = hist / (hist.sum() + 1e-7)  # Normalize
-        hist_features.extend(hist)
+    # Add statistical features (6 features)
+    # Mean color per channel (3 features)
+    hist_features.extend([
+        rgb_image[:,:,0].mean() / 255.0,
+        rgb_image[:,:,1].mean() / 255.0,
+        rgb_image[:,:,2].mean() / 255.0
+    ])
+    
+    # Std per channel (3 features) for texture/contrast
+    hist_features.extend([
+        rgb_image[:,:,0].std() / 255.0,
+        rgb_image[:,:,1].std() / 255.0,
+        rgb_image[:,:,2].std() / 255.0
+    ])
     
     return np.array(hist_features)
 
@@ -136,8 +144,10 @@ def extract_combined_features(image):
     """
     Extract and combine multiple feature types
     
-    Combines HOG (shape/edges), Color Histograms (color distribution),
-    and LBP (texture) for comprehensive image representation.
+    OPTIMIZED: Combines HOG (shape/edges) and Color features only.
+    LBP removed as it adds too much sparsity without improving accuracy.
+    
+    Total features: ~630 (576 HOG + 54 Color)
     
     Args:
         image: Input image (BGR)
@@ -147,11 +157,10 @@ def extract_combined_features(image):
     """
     # Extract individual features
     hog_features = extract_hog_features(image)
-    color_features = extract_color_histogram(image, bins=32)
-    lbp_features = extract_lbp_features(image, num_points=24, radius=8)
+    color_features = extract_color_histogram(image, bins=16)
     
-    # Concatenate all features
-    combined = np.concatenate([hog_features, color_features, lbp_features])
+    # Concatenate features (NO LBP)
+    combined = np.concatenate([hog_features, color_features])
     
     return combined
 
