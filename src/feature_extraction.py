@@ -1,30 +1,13 @@
-"""
-Feature Extraction Module
-
-This module converts raw images into fixed-size feature vectors.
-This is the critical step that transforms pixel data into numerical features
-that can be used by ML classifiers.
-
-Key Tasks:
-- Implement multiple feature extraction methods
-- Convert 2D/3D images to 1D feature vectors
-- Ensure fixed-length output for all images
-- Compare different feature extraction approaches
-
-Suggested Feature Extraction Methods:
-1. Histogram of Oriented Gradients (HOG)
-2. Color Histograms (RGB/HSV)
-3. Local Binary Patterns (LBP)
-4. Statistical features (mean, std, etc.)
-5. SIFT/ORB bag-of-words features
-"""
-
 import cv2
 import numpy as np
 from skimage.feature import hog, local_binary_pattern, graycomatrix, graycoprops
 from skimage.filters import gabor
 from skimage.measure import moments_hu
 from sklearn.preprocessing import StandardScaler
+from tensorflow.keras.applications import MobileNetV2, ResNet50, EfficientNetB0
+from tensorflow.keras.applications.mobilenet_v2 import preprocess_input as preprocess_mobilenet
+from tensorflow.keras.applications.resnet50 import preprocess_input as preprocess_resnet
+from tensorflow.keras.applications.efficientnet import preprocess_input as preprocess_efficientnet
 
 
 def extract_hog_features(image, orientations=9, pixels_per_cell=(16, 16), cells_per_block=(2, 2)):
@@ -76,13 +59,20 @@ def extract_color_histogram(image, bins=32):
     - Applies contrast enhancement (similar to CLAHE for HOG)
     - Adds color moments (mean, std, skewness) for better discrimination
     - Uses HSV for better color representation
+    - GLASS/METAL/PLASTIC SPECIFIC: Brightness and reflectivity features
+      * Glass: transparent/bright, high V channel, low saturation
+      * Metal: metallic/shiny, high variance in V, specular highlights
+      * Plastic: colored/matte, moderate saturation, uniform brightness
     
     Args:
         image: Input image (BGR)
         bins: Number of bins per channel (default: 32)
         
     Returns:
-        feature_vector: 1D numpy array (96 histogram + 9 moments = 105 features)
+        feature_vector: 1D numpy array (~118 features)
+          - 96 histogram bins (HSV)
+          - 9 color moments (HSV mean/std/skew)
+          - 13 brightness/reflectivity features
     """
     # Convert BGR to HSV
     hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
@@ -107,6 +97,76 @@ def extract_color_histogram(image, bins=32):
         std = channel.std() / 255.0
         skewness = ((channel - channel.mean()) ** 3).mean() / (channel.std() ** 3 + 1e-7)
         hist_features.extend([mean, std, skewness])
+    
+    # === BRIGHTNESS & REFLECTIVITY FEATURES (13 features) ===
+    # Critical for glass/metal/plastic distinction
+    
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(float)
+    h_channel = hsv_image[:,:,0].astype(float)
+    s_channel = hsv_image[:,:,1].astype(float)
+    v_channel = hsv_image[:,:,2].astype(float)
+    
+    # 1-2. V channel statistics (brightness)
+    # Glass: high mean V (bright/transparent)
+    # Metal: high variance in V (shiny reflections)
+    # Plastic: moderate, uniform V
+    v_mean = v_channel.mean() / 255.0
+    v_variance = v_channel.var() / (255.0 ** 2)
+    
+    # 3-4. Saturation statistics
+    # Glass: low saturation (clear/transparent)
+    # Plastic: moderate-high saturation (colored)
+    # Metal: low saturation (gray/metallic)
+    s_mean = s_channel.mean() / 255.0
+    s_variance = s_channel.var() / (255.0 ** 2)
+    
+    # 5. Saturation-to-brightness ratio
+    # Glass: low S, high V → low ratio
+    # Plastic: high S, moderate V → high ratio
+    # Metal: low S, variable V → low ratio
+    s_v_ratio = (s_mean + 1e-7) / (v_mean + 1e-7)
+    
+    # 6-7. Specular highlight detection (very bright pixels)
+    # Metal/glass have more specular highlights than plastic
+    bright_threshold = np.percentile(v_channel, 90)
+    specular_pixels = (v_channel > bright_threshold).sum() / v_channel.size
+    specular_intensity = v_channel[v_channel > bright_threshold].mean() / 255.0 if specular_pixels > 0 else 0
+    
+    # 8-9. Dark region statistics (shadows/depth)
+    dark_threshold = np.percentile(v_channel, 10)
+    dark_pixels = (v_channel < dark_threshold).sum() / v_channel.size
+    dark_intensity = v_channel[v_channel < dark_threshold].mean() / 255.0 if dark_pixels > 0 else 0
+    
+    # 10. Brightness uniformity (coefficient of variation)
+    # Plastic: more uniform
+    # Metal/glass: more variable (reflections)
+    brightness_uniformity = (v_channel.std() + 1e-7) / (v_channel.mean() + 1e-7)
+    
+    # 11. High-frequency brightness changes (reflectivity indicator)
+    # Metal/glass: more edges in brightness
+    sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    brightness_gradient = np.mean(np.sqrt(sobelx**2 + sobely**2)) / 255.0
+    
+    # 12-13. Color purity (distance from grayscale)
+    # Glass/metal: closer to grayscale (low saturation)
+    # Plastic: more colorful (high saturation)
+    color_purity_mean = s_channel.mean() / 255.0
+    color_purity_max = s_channel.max() / 255.0
+    
+    # Combine all brightness/reflectivity features
+    brightness_features = [
+        v_mean, v_variance,
+        s_mean, s_variance,
+        s_v_ratio,
+        specular_pixels, specular_intensity,
+        dark_pixels, dark_intensity,
+        brightness_uniformity,
+        brightness_gradient,
+        color_purity_mean, color_purity_max
+    ]
+    
+    hist_features.extend(brightness_features)
     
     return np.array(hist_features)
 
@@ -140,10 +200,14 @@ def extract_lbp_features(image, num_points=24, radius=8):
     
     all_hist = []
     
-    # Multi-scale LBP: use different radii to capture textures at different scales
-    # Helps distinguish fine textures (paper) from coarse textures (metal scratches)
-    radii = [1, 3, 8]  # Small, medium, large scale
-    points_list = [8, 16, 24]  # Corresponding points
+    # ENHANCED Multi-scale LBP: 4 scales with more points for finer texture discrimination
+    # Glass vs Plastic vs Metal requires capturing textures at multiple granularities:
+    # - Fine scale (r=1): Surface smoothness (glass=very smooth, plastic=semi-smooth, metal=scratches)
+    # - Small scale (r=2): Micro-texture patterns
+    # - Medium scale (r=5): Grain patterns (metal grain vs plastic molding)
+    # - Large scale (r=8): Macro structure
+    radii = [1, 2, 5, 8]  # 4 scales instead of 3
+    points_list = [8, 16, 24, 24]  # More points for finer detail
     
     for r, p in zip(radii, points_list):
         # Compute LBP with rotation invariance
@@ -191,44 +255,6 @@ def extract_gabor_features(image, frequencies=[0.1, 0.2, 0.3], num_orientations=
             features.append(np.mean(real))
             features.append(np.std(real))
             features.append(np.mean(np.abs(real)))
-    
-    return np.array(features)
-
-
-def extract_glcm_features(image, distances=[1, 3], angles=[0, np.pi/4, np.pi/2, 3*np.pi/4]):
-    """
-    Extract Gray-Level Co-occurrence Matrix (GLCM) texture features
-    
-    GLCM captures spatial relationships in texture:
-    - Glass: homogeneous, low contrast
-    - Plastic: moderate texture variation  
-    - Metal: higher contrast, more structured patterns
-    
-    Args:
-        image: BGR image (224, 224, 3)
-        distances: Pixel pair distance offsets
-        angles: Pixel pair angles
-    
-    Returns:
-        1D feature vector with GLCM texture properties
-    """
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    
-    # Quantize to 32 levels for faster computation
-    gray = (gray // 8).astype(np.uint8)
-    
-    # Compute GLCM
-    glcm = graycomatrix(gray, distances=distances, angles=angles, 
-                        levels=32, symmetric=True, normed=True)
-    
-    # Extract texture properties
-    features = []
-    properties = ['contrast', 'dissimilarity', 'homogeneity', 'energy', 'correlation']
-    
-    for prop in properties:
-        values = graycoprops(glcm, prop)
-        features.append(np.mean(values))
-        features.append(np.std(values))
     
     return np.array(features)
 
@@ -301,17 +327,29 @@ def extract_edge_features(image):
 
 def extract_combined_features(image):
     """
-    Extract and combine OPTIMIZED feature types with balanced weighting
+    Extract and combine ENHANCED COLOR + TEXTURE features
     
-    Removed expensive Gabor and GLCM (slow, minimal accuracy gain)
-    Kept fast, effective features:
-    - HOG: CLAHE + edge detection (~6084 features)
-    - LBP: CLAHE + multi-scale texture (54 features)
-    - Color: Histogram equalization + moments (105 features)
-    - Edge: Density and sharpness (6 features) - FAST
-    - Shape: Hu moments (7 features) - FAST
+    REMOVED HOG - it was dominating (6084/6256 = 97%) and not discriminative
+    for materials with similar shapes (bottles, containers, sheets).
     
-    Total: ~6256 features (all normalized separately for equal influence)
+    ENHANCED FOR GLASS/METAL/PLASTIC DISCRIMINATION:
+    - Color: HSV + brightness/reflectivity (~118 features)
+      * Glass: bright, transparent, low saturation, specular highlights
+      * Metal: shiny, variable brightness, metallic, specular highlights
+      * Plastic: colored, uniform brightness, moderate saturation
+    - LBP: CLAHE + 4-scale multi-scale texture (~68 features)
+      * Glass: very smooth surface
+      * Plastic: semi-smooth with molding patterns
+      * Metal: grain patterns and scratches
+    - Edge: Density and sharpness (6 features) - edge quality differences
+    - Shape: Hu moments (7 features) - shape invariants
+    
+    Total: ~199 features (all normalized separately)
+    
+    Benefits:
+    - Enhanced color discrimination with brightness/reflectivity
+    - Finer texture detail with 4-scale LBP
+    - Better glass/metal/plastic distinction
     
     Args:
         image: Input image (BGR)
@@ -319,30 +357,101 @@ def extract_combined_features(image):
     Returns:
         feature_vector: Combined and balanced 1D feature vector
     """
-    # Extract optimized features (removed slow Gabor and GLCM)
-    hog_features = extract_hog_features(image)
-    color_features = extract_color_histogram(image, bins=32)
-    lbp_features = extract_lbp_features(image)
-    shape_features = extract_shape_features(image)
-    edge_features = extract_edge_features(image)
+    # Extract ENHANCED COLOR and TEXTURE features
+    color_features = extract_color_histogram(image, bins=32)  # ~118 features (was 105)
+    lbp_features = extract_lbp_features(image)  # ~68 features (was 54)
+    shape_features = extract_shape_features(image)  # 7 features
+    edge_features = extract_edge_features(image)  # 6 features
     
     # Normalize each feature type separately for equal voting power
-    hog_norm = (hog_features - hog_features.mean()) / (hog_features.std() + 1e-7)
     color_norm = (color_features - color_features.mean()) / (color_features.std() + 1e-7)
     lbp_norm = (lbp_features - lbp_features.mean()) / (lbp_features.std() + 1e-7)
     shape_norm = (shape_features - shape_features.mean()) / (shape_features.std() + 1e-7)
     edge_norm = (edge_features - edge_features.mean()) / (edge_features.std() + 1e-7)
     
-    # Concatenate: Optimized feature set
+    # Concatenate: Material-focused features (no shape bias)
     combined = np.concatenate([
-        hog_norm, 
-        lbp_norm, 
-        color_norm,
-        shape_norm,
-        edge_norm
+        color_norm,  # ~118 features - PRIMARY discriminator with brightness/reflectivity
+        lbp_norm,    # ~68 features - 4-scale texture patterns
+        edge_norm,   # 6 features - edge quality
+        shape_norm   # 7 features - shape invariants
     ])
     
     return combined
+
+
+def extract_cnn_features(image, model_name='mobilenetv2'):
+    """
+    Extract features using pre-trained CNN (Transfer Learning)
+    
+    Uses a pre-trained CNN model (trained on ImageNet) as a feature extractor.
+    The CNN automatically learns discriminative features from images.
+    
+    Advantages over handcrafted features:
+    - Learns hierarchical features (edges → textures → objects)
+    - Pre-trained on millions of images
+    - Often achieves 5-10% higher accuracy
+    - Captures complex patterns humans can't easily design
+    
+    Models:
+    - MobileNetV2: Fast, lightweight (1280 features), recommended
+    - ResNet50: Accurate, heavier (2048 features)
+    - EfficientNetB0: Best balance (1280 features)
+    
+    Args:
+        image: BGR image (224, 224, 3)
+        model_name: CNN model to use ('mobilenetv2', 'resnet50', 'efficientnet')
+        
+    Returns:
+        feature_vector: 1D numpy array (1280 or 2048 features depending on model)
+    """
+    # Convert BGR to RGB (Keras expects RGB)
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    
+    # Expand dimensions for batch (model expects (batch_size, height, width, channels))
+    image_batch = np.expand_dims(image_rgb, axis=0)
+    
+    # Select model and preprocessing
+    if model_name.lower() == 'mobilenetv2':
+        if not hasattr(extract_cnn_features, 'mobilenet_model'):
+            print("Loading MobileNetV2 model (first time only)...")
+            extract_cnn_features.mobilenet_model = MobileNetV2(
+                weights='imagenet',
+                include_top=False,  # Remove classification layer
+                pooling='avg'  # Global average pooling
+            )
+        model = extract_cnn_features.mobilenet_model
+        image_preprocessed = preprocess_mobilenet(image_batch)
+        
+    elif model_name.lower() == 'resnet50':
+        if not hasattr(extract_cnn_features, 'resnet_model'):
+            print("Loading ResNet50 model (first time only)...")
+            extract_cnn_features.resnet_model = ResNet50(
+                weights='imagenet',
+                include_top=False,
+                pooling='avg'
+            )
+        model = extract_cnn_features.resnet_model
+        image_preprocessed = preprocess_resnet(image_batch)
+        
+    elif model_name.lower() == 'efficientnet':
+        if not hasattr(extract_cnn_features, 'efficientnet_model'):
+            print("Loading EfficientNetB0 model (first time only)...")
+            extract_cnn_features.efficientnet_model = EfficientNetB0(
+                weights='imagenet',
+                include_top=False,
+                pooling='avg'
+            )
+        model = extract_cnn_features.efficientnet_model
+        image_preprocessed = preprocess_efficientnet(image_batch)
+    else:
+        raise ValueError(f"Unknown model: {model_name}. Use 'mobilenetv2', 'resnet50', or 'efficientnet'")
+    
+    # Extract features
+    features = model.predict(image_preprocessed, verbose=0)
+    
+    # Flatten to 1D array
+    return features.flatten()
 
 
 def extract_features_from_dataset(images, method='combined'):
@@ -372,8 +481,12 @@ def extract_features_from_dataset(images, method='combined'):
         extractor = extract_lbp_features
     elif method == 'combined':
         extractor = extract_combined_features
+    elif method in ['cnn', 'mobilenetv2', 'resnet50', 'efficientnet']:
+        # CNN-based feature extraction
+        model_name = method if method != 'cnn' else 'mobilenetv2'
+        extractor = lambda img: extract_cnn_features(img, model_name=model_name)
     else:
-        raise ValueError(f"Unknown method: {method}. Use 'hog', 'color', 'lbp', or 'combined'")
+        raise ValueError(f"Unknown method: {method}. Use 'hog', 'color', 'lbp', 'combined', 'cnn', 'mobilenetv2', 'resnet50', or 'efficientnet'")
     
     # Extract features from each image
     features_list = []
