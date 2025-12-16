@@ -30,6 +30,10 @@ Thumbs.db
 # Data (uncomment if dataset is too large)
 # dataset/
 
+# Large processed data files
+data/processed/*.npz
+*.npz
+
 # Logs
 *.log
 logs/
