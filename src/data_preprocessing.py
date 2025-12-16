@@ -1,20 +1,3 @@
-"""
-Data Preprocessing and Augmentation Module
-
-This module handles:
-1. Loading images from the dataset
-2. Applying data augmentation (minimum 30% increase)
-3. Splitting data into training and validation sets
-4. Saving augmented dataset
-
-Key Tasks:
-- Implement data loading from dataset folders
-- Apply augmentation techniques: rotation, flipping, scaling, color jitter
-- Ensure at least 30% increase in training samples
-- Maintain class balance during augmentation
-- Save processed data for feature extraction
-"""
-
 import os
 import numpy as np
 import cv2
@@ -33,13 +16,12 @@ CLASS_NAMES = {
     3: 'plastic',
     4: 'metal',
     5: 'trash',
-    6: 'unknown'  # Out-of-distribution or blurred inputs
+    6: 'unknown'
 }
 
 
 def create_augmentation_pipeline():
     transform = A.Compose([
-        # Geometric transformations
         A.HorizontalFlip(p=0.5),              # 50% chance to flip horizontally
         A.VerticalFlip(p=0.2),                # 20% chance to flip vertically
         A.Rotate(limit=15, p=0.7),            # Rotate ±15 degrees, 70% chance
@@ -50,23 +32,13 @@ def create_augmentation_pipeline():
             p=0.5
         ),
         
-        # Color/Intensity transformations
+        # Color/Intensity transformations (PRESERVED - critical for color features)
         A.RandomBrightnessContrast(
             brightness_limit=0.2,             # Brightness ±20%
             contrast_limit=0.2,               # Contrast ±20%
             p=0.5
         ),
-        
-        # Noise and blur
-        A.GaussNoise(
-            var_limit=(10, 50),               # Add slight noise (variance range)
-            mean=0,
-            p=0.3
-        ),
-        A.GaussianBlur(
-            blur_limit=(3, 5),                # Slight blur
-            p=0.2
-        ),
+
     ])
     
     return transform
@@ -135,87 +107,7 @@ def load_dataset(dataset_path):
     return images, labels, CLASS_NAMES
 
 
-def generate_unknown_class(images, labels, unknown_ratio=0.15):
-    print(f"\n{'='*60}")
-    print("GENERATING UNKNOWN CLASS (Out-of-Distribution)")
-    print(f"{'='*60}")
-    
-    # Calculate number of unknown samples to generate
-    num_originals = len(images)
-    num_unknown = int(num_originals * unknown_ratio)
-    
-    print(f"\nOriginal dataset size: {num_originals}")
-    print(f"Unknown samples to generate: {num_unknown} ({unknown_ratio*100}% of dataset)")
-    
-    # Create extreme transformation pipeline for unknown class
-    unknown_transform = A.Compose([
-        # Extreme blur to make unrecognizable
-        A.OneOf([
-            A.GaussianBlur(blur_limit=(15, 25), p=1.0),  # Heavy blur
-            A.MotionBlur(blur_limit=(15, 25), p=1.0),    # Motion blur
-            A.MedianBlur(blur_limit=15, p=1.0),          # Median blur
-        ], p=0.8),
-        
-        # Heavy noise
-        A.OneOf([
-            A.GaussNoise(var_limit=(100.0, 200.0), p=1.0),  # Extreme noise
-            A.ISONoise(color_shift=(0.3, 0.8), intensity=(0.7, 1.0), p=1.0),
-        ], p=0.7),
-        
-        # Severe distortions
-        A.OneOf([
-            A.ElasticTransform(alpha=200, sigma=20, p=1.0),
-            A.GridDistortion(num_steps=10, distort_limit=0.5, p=1.0),
-            A.OpticalDistortion(distort_limit=0.5, shift_limit=0.3, p=1.0),
-        ], p=0.6),
-        
-        # Extreme color/brightness changes
-        A.RandomBrightnessContrast(
-            brightness_limit=(-0.5, 0.5),
-            contrast_limit=(-0.5, 0.5),
-            p=0.8
-        ),
-        
-        # Random crops and rotations
-        A.RandomRotate90(p=0.5),
-        A.Rotate(limit=180, p=0.5),
-    ])
-    
-    unknown_images = []
-    unknown_labels = []
-    
-    print("Generating unknown samples...")
-    for _ in tqdm(range(num_unknown), desc="Creating unknown class"):
-        # Randomly select an image from any class
-        idx = np.random.randint(0, len(images))
-        original_img = images[idx]
-        
-        # Apply extreme transformations
-        transformed = unknown_transform(image=original_img)
-        unknown_img = transformed['image']
-        
-        unknown_images.append(unknown_img)
-        unknown_labels.append(6)  # Class ID for unknown
-    
-    # Combine original + unknown
-    images_with_unknown = np.concatenate([images, np.array(unknown_images)])
-    labels_with_unknown = np.concatenate([labels, np.array(unknown_labels)])
-    
-    print(f"\n{'='*60}")
-    print("UNKNOWN CLASS GENERATION COMPLETE")
-    print(f"{'='*60}")
-    print(f"Total dataset size: {len(images_with_unknown)}")
-    print(f"Unknown samples added: {num_unknown}")
-    print(f"\nFinal class distribution:")
-    for class_id in range(7):  # 0-6 including unknown
-        count = np.sum(labels_with_unknown == class_id)
-        class_name = CLASS_NAMES[class_id]
-        print(f"  {class_id} ({class_name}): {count} images")
-    
-    return images_with_unknown, labels_with_unknown
-
-
-def augment_dataset(images, labels, augmentation_factor=0.3):
+def augment_dataset(images, labels, augmentation_factor=0.3, balance_classes=False):
     print(f"\n{'='*60}")
     print("STARTING DATA AUGMENTATION")
     print(f"{'='*60}")
@@ -223,38 +115,77 @@ def augment_dataset(images, labels, augmentation_factor=0.3):
     # Create augmentation pipeline
     transform = create_augmentation_pipeline()
     
-    # Calculate how many augmented samples to create
+    # Get unique classes
+    unique_classes = np.unique(labels)
+    
+    # Calculate class sizes
+    class_sizes = {class_id: np.sum(labels == class_id) for class_id in unique_classes}
     num_originals = len(images)
-    num_to_augment = int(num_originals * augmentation_factor)
     
     print(f"\nOriginal dataset size: {num_originals}")
-    print(f"Augmentation factor: {augmentation_factor} ({augmentation_factor*100}%)")
-    print(f"Augmented samples to generate: {num_to_augment}")
-    print(f"Target total size: {num_originals + num_to_augment}")
+    print(f"Augmentation budget: {augmentation_factor*100}% ({int(num_originals * augmentation_factor)} new samples)")
+    print(f"\nOriginal class distribution:")
+    for class_id in unique_classes:
+        count = class_sizes[class_id]
+        class_name = CLASS_NAMES.get(class_id, f"Class_{class_id}")
+        pct = (count / num_originals * 100)
+        print(f"  {class_name}: {count} images ({pct:.1f}%)")
     
     # Start with original images and labels
     augmented_images = list(images)
     augmented_labels = list(labels)
     
-    # Get unique classes for proportional augmentation
-    unique_classes = np.unique(labels)
+    if balance_classes:
+        print(f"\n🎯 SMART BALANCING: Distributing {int(num_originals * augmentation_factor)} new samples to balance classes")
+        
+        # Calculate total budget
+        total_budget = int(num_originals * augmentation_factor)
+        
+        # Calculate class weights (inverse of class size - smaller classes get more)
+        class_weights = {}
+        total_weight = 0
+        for class_id in unique_classes:
+            # Inverse proportion: smaller classes have higher weight
+            weight = 1.0 / class_sizes[class_id]
+            class_weights[class_id] = weight
+            total_weight += weight
+        
+        # Normalize weights and calculate augmentation for each class
+        class_aug_counts = {}
+        for class_id in unique_classes:
+            # Proportional to inverse class size
+            normalized_weight = class_weights[class_id] / total_weight
+            aug_count = int(total_budget * normalized_weight)
+            class_aug_counts[class_id] = aug_count
+        
+        print("\n📊 Smart distribution (more samples to smaller classes):")
+    else:
+        print(f"\nProportional augmentation: {augmentation_factor*100}% increase per class")
+        class_aug_counts = {}
+        for class_id in unique_classes:
+            class_aug_counts[class_id] = int(class_sizes[class_id] * augmentation_factor)
     
-    print(f"\nAugmenting each class proportionally...")
+    print(f"\nAugmenting classes...")
     
-    # Augment each class separately to maintain balance
+    # Augment each class
     for class_id in unique_classes:
         # Get indices and images for this class
         class_indices = np.where(labels == class_id)[0]
         class_images = images[class_indices]
+        original_count = len(class_images)
         
-        # Calculate how many augmented samples for this class
-        class_aug_count = int(len(class_images) * augmentation_factor)
+        class_aug_count = class_aug_counts[class_id]
         
-        if class_aug_count == 0:
+        if class_aug_count <= 0:
+            class_name = CLASS_NAMES.get(class_id, f"Class_{class_id}")
+            print(f"  {class_name}: no augmentation")
             continue
         
         class_name = CLASS_NAMES.get(class_id, f"Class_{class_id}")
-        print(f"  {class_name}: generating {class_aug_count} augmented images...")
+        target_count = original_count + class_aug_count
+        increase_pct = (class_aug_count / original_count * 100)
+        final_pct = (target_count / (num_originals + sum(class_aug_counts.values())) * 100)
+        print(f"  {class_name}: {original_count} → {target_count} (+{class_aug_count}, +{increase_pct:.0f}%) = {final_pct:.1f}% of total")
         
         # Generate augmented images for this class
         for _ in tqdm(range(class_aug_count), desc=f"  Augmenting {class_name}", leave=False):
@@ -290,6 +221,96 @@ def augment_dataset(images, labels, augmentation_factor=0.3):
         print(f"  {CLASS_NAMES[class_id]}: {original_count} → {count} (+{increase})")
     
     return augmented_images, augmented_labels
+
+
+def save_preprocessed_data(images, labels, output_path, filename='preprocessed_data.npz'):
+    """
+    Save preprocessed images and labels to disk for fast loading later
+    
+    This avoids having to reload from folders and reprocess images every time.
+    Uses numpy's compressed format for efficient storage.
+    
+    Args:
+        images: Numpy array of images (N, H, W, C)
+        labels: Numpy array of labels (N,)
+        output_path: Directory to save the file
+        filename: Name of the output file (default: preprocessed_data.npz)
+    
+    Returns:
+        Path to saved file
+    """
+    from pathlib import Path
+    
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    filepath = output_path / filename
+    
+    print(f"\n{'='*60}")
+    print("SAVING PREPROCESSED DATA")
+    print(f"{'='*60}")
+    print(f"Images shape: {images.shape}")
+    print(f"Labels shape: {labels.shape}")
+    print(f"Saving to: {filepath}")
+    
+    # Save using numpy's compressed format
+    np.savez_compressed(
+        filepath,
+        images=images,
+        labels=labels
+    )
+    
+    # Get file size
+    file_size_mb = filepath.stat().st_size / (1024 * 1024)
+    print(f"✓ Saved successfully!")
+    print(f"✓ File size: {file_size_mb:.2f} MB")
+    print(f"{'='*60}")
+    
+    return str(filepath)
+
+
+def load_preprocessed_data(filepath):
+    """
+    Load preprocessed images and labels from disk
+    
+    Much faster than loading from folders - loads directly into RAM.
+    
+    Args:
+        filepath: Path to the .npz file
+    
+    Returns:
+        images: Numpy array of images (N, H, W, C)
+        labels: Numpy array of labels (N,)
+    """
+    from pathlib import Path
+    import time
+    
+    filepath = Path(filepath)
+    
+    if not filepath.exists():
+        raise FileNotFoundError(f"Preprocessed data not found at: {filepath}")
+    
+    print(f"\n{'='*60}")
+    print("LOADING PREPROCESSED DATA FROM CACHE")
+    print(f"{'='*60}")
+    print(f"Loading from: {filepath}")
+    
+    start_time = time.time()
+    
+    # Load the data
+    data = np.load(filepath)
+    images = data['images']
+    labels = data['labels']
+    
+    load_time = time.time() - start_time
+    
+    print(f"✓ Loaded in {load_time:.2f} seconds")
+    print(f"✓ Images shape: {images.shape}")
+    print(f"✓ Labels shape: {labels.shape}")
+    print(f"✓ Unique classes: {np.unique(labels)}")
+    print(f"{'='*60}")
+    
+    return images, labels
 
 
 def split_data(images, labels, test_size=0.2, random_state=42):
