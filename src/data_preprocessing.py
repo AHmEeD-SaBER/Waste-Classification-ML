@@ -123,7 +123,6 @@ def augment_dataset(images, labels, augmentation_factor=0.3, balance_classes=Fal
     num_originals = len(images)
     
     print(f"\nOriginal dataset size: {num_originals}")
-    print(f"Augmentation budget: {augmentation_factor*100}% ({int(num_originals * augmentation_factor)} new samples)")
     print(f"\nOriginal class distribution:")
     for class_id in unique_classes:
         count = class_sizes[class_id]
@@ -136,29 +135,19 @@ def augment_dataset(images, labels, augmentation_factor=0.3, balance_classes=Fal
     augmented_labels = list(labels)
     
     if balance_classes:
-        print(f"\n🎯 SMART BALANCING: Distributing {int(num_originals * augmentation_factor)} new samples to balance classes")
+        # Find the maximum class size - all classes will be augmented to this target
+        max_class_size = max(class_sizes.values())
+        print(f"\n🎯 BALANCING CLASSES: Target size = {max_class_size} (largest class)")
         
-        # Calculate total budget
-        total_budget = int(num_originals * augmentation_factor)
-        
-        # Calculate class weights (inverse of class size - smaller classes get more)
-        class_weights = {}
-        total_weight = 0
-        for class_id in unique_classes:
-            # Inverse proportion: smaller classes have higher weight
-            weight = 1.0 / class_sizes[class_id]
-            class_weights[class_id] = weight
-            total_weight += weight
-        
-        # Normalize weights and calculate augmentation for each class
+        # Calculate how many samples each class needs to reach the target
         class_aug_counts = {}
         for class_id in unique_classes:
-            # Proportional to inverse class size
-            normalized_weight = class_weights[class_id] / total_weight
-            aug_count = int(total_budget * normalized_weight)
+            # Each class needs (max_size - current_size) new samples
+            aug_count = max_class_size - class_sizes[class_id]
             class_aug_counts[class_id] = aug_count
         
-        print("\n📊 Smart distribution (more samples to smaller classes):")
+        total_new = sum(class_aug_counts.values())
+        print(f"Total new samples to generate: {total_new}")
     else:
         print(f"\nProportional augmentation: {augmentation_factor*100}% increase per class")
         class_aug_counts = {}

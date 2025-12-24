@@ -2,12 +2,15 @@
 Test file for Waste Classification Model Evaluation
 
 This file contains the predict function for evaluation on a hidden dataset.
+Saves results to Excel file.
 """
 
 import cv2
 import numpy as np
 import joblib
+import pandas as pd
 from pathlib import Path
+from datetime import datetime
 from skimage.feature import local_binary_pattern
 from tensorflow.keras.applications import MobileNetV2, ResNet50, EfficientNetB0
 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input as preprocess_mobilenet
@@ -133,8 +136,57 @@ def extract_cnn_features(image, model_name='mobilenetv2'):
     # Flatten to 1D array
     return features.flatten()
 
+def extract_features_from_dataset(images, method='combined'):
+    from tqdm import tqdm
+    
+    print(f"\n{'='*60}")
+    print(f"EXTRACTING FEATURES: {method.upper()} METHOD")
+    print(f"{'='*60}")
+    print(f"Total images: {len(images)}")
+    
+    # Select feature extraction method
+    if method == 'color':
+        extractor = extract_color_histogram
+    elif method == 'lbp':
+        extractor = extract_lbp_features
+    elif method == 'combined':
+        extractor = extract_combined_features
+    elif method in ['cnn', 'mobilenetv2', 'resnet50', 'efficientnet']:
+        # CNN-based feature extraction
+        model_name = method if method != 'cnn' else 'mobilenetv2'
+        extractor = lambda img: extract_cnn_features(img, model_name=model_name)
+    else:
+        raise ValueError(f"Unknown method: {method}. Use 'color', 'lbp', 'combined', 'cnn', 'mobilenetv2', 'resnet50', or 'efficientnet'")
+    
+    # Extract features from each image
+    features_list = []
+    for img in tqdm(images, desc="Extracting features"):
+        features = extractor(img)
+        features_list.append(features)
+    
+    # Convert to numpy array
+    features = np.array(features_list)
+    
+    print(f"\nFeature extraction complete!")
+    print(f"Feature matrix shape: {features.shape}")
+    print(f"Features per image: {features.shape[1]}")
+    print(f"{'='*60}\n")
+    
+    return features
 
-def predict(dataFilePath, bestModelPath):
+def predict(dataFilePath, bestModelPath, confidence_threshold=0.5):
+    """
+    Predict waste classification for images in a folder and save to Excel.
+    
+    Args:
+        dataFilePath: Path to folder containing images
+        bestModelPath: Path to the trained model (.pkl file)
+        confidence_threshold: Minimum confidence to accept prediction (default: 0.5)
+                            If max probability < threshold, classify as 'unknown'
+    
+    Returns:
+        List of predicted class names
+    """
     # Define class names mapping
     CLASS_NAMES = {
         0: 'glass',
@@ -181,37 +233,96 @@ def predict(dataFilePath, bestModelPath):
     image_files = sorted(set(image_files))
     
     predictions = []
+    confidences = []
+    valid_images = []
+    valid_indices = []
     
-    for img_path in image_files:
+    # First pass: load and collect all valid images
+    for idx, img_path in enumerate(image_files):
         # Load image
         image = cv2.imread(str(img_path))
         
         if image is None:
-            # If image can't be loaded, predict most common class
-            predictions.append('trash')
+            # Mark this index as invalid
             continue
         
         # Resize to standard size (224x224)
         image_resized = cv2.resize(image, (224, 224))
-        
-        # Extract features based on model type
+        valid_images.append(image_resized)
+        valid_indices.append(idx)
+    
+    # Extract features for all valid images at once
+    if valid_images:
         if use_cnn:
-            features = extract_cnn_features(image_resized)
+            all_features = extract_features_from_dataset(valid_images, method='cnn')
         else:
-            features = extract_combined_features(image_resized)
+            all_features = extract_features_from_dataset(valid_images, method='combined')
         
-        # Reshape for sklearn (1 sample)
-        features = features.reshape(1, -1)
+        # Scale all features
+        all_features_scaled = scaler.transform(all_features)
         
-        # Scale features
-        features_scaled = scaler.transform(features)
-        
-        # Predict
-        class_id = model.predict(features_scaled)[0]
-        
-        # Convert to class name
-        class_name = CLASS_NAMES.get(class_id, 'trash')
-        predictions.append(class_name)
+        # Get predictions for all images
+        all_proba = model.predict_proba(all_features_scaled)
+    
+    # Build predictions list maintaining original order
+    feature_idx = 0
+    for idx in range(len(image_files)):
+        if idx in valid_indices:
+            proba = all_proba[feature_idx]
+            max_proba = np.max(proba)
+            class_id = np.argmax(proba)
+            
+            # Unknown rejection: if confidence is below threshold, classify as 'unknown'
+            if max_proba < confidence_threshold:
+                predictions.append('unknown')
+                confidences.append(max_proba)
+            else:
+                class_name = CLASS_NAMES.get(class_id, 'unknown')
+                predictions.append(class_name)
+                confidences.append(max_proba)
+            feature_idx += 1
+        else:
+            # Image couldn't be loaded, classify as unknown
+            predictions.append('unknown')
+            confidences.append(0.0)
+    
+    # Create DataFrame with results - only image name and predicted label
+    results_df = pd.DataFrame({
+        'Image_Name': [img.name for img in image_files],
+        'Predicted_Label': predictions
+    })
+    
+    # Create results directory if it doesn't exist
+    results_dir = Path("results")
+    results_dir.mkdir(exist_ok=True)
+    
+    # Create timestamped filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_excel_path = results_dir / f"waste_classification_results_{timestamp}.xlsx"
+    
+    # Save to Excel - try openpyxl first, fallback to xlsxwriter
+    try:
+        with pd.ExcelWriter(output_excel_path, engine='openpyxl') as writer:
+            results_df.to_excel(writer, sheet_name='Predictions', index=False)
+            
+            # Get the worksheet
+            worksheet = writer.sheets['Predictions']
+            
+            # Adjust column widths
+            worksheet.column_dimensions['A'].width = 35  # Image_Name
+            worksheet.column_dimensions['B'].width = 20  # Predicted_Label
+    except ImportError:
+        # Fallback to xlsxwriter if openpyxl not available
+        print("\nNote: openpyxl not found, using xlsxwriter as fallback...")
+        with pd.ExcelWriter(output_excel_path, engine='xlsxwriter') as writer:
+            results_df.to_excel(writer, sheet_name='Predictions', index=False)
+            
+            # Auto-adjust column widths
+            worksheet = writer.sheets['Predictions']
+            worksheet.set_column(0, 0, 35)  # Image_Name
+            worksheet.set_column(1, 1, 20)  # Predicted_Label
+    
+    print(f"\n✅ Results saved to: {output_excel_path}")
     
     return predictions
 
@@ -284,7 +395,7 @@ if __name__ == "__main__":
     print(f"\n✅ Predictions Complete!")
     print(f"   Total images: {len(results)}")
     print("\n" + "="*60)
-    print("RESULTS:")
+    print("RESULTS SUMMARY:")
     print("="*60)
     
     # Count predictions per class
@@ -298,17 +409,4 @@ if __name__ == "__main__":
     
     print("\n" + "-"*25)
     print(f"{'TOTAL':<15} {len(results):>8}")
-    
-    # Show individual predictions
-    print("\n" + "="*60)
-    print("INDIVIDUAL PREDICTIONS:")
-    print("="*60)
-    
-    image_files = sorted(Path(data_path).glob('*'))
-    image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff']
-    image_files = [f for f in image_files if f.suffix.lower() in image_extensions]
-    
-    for i, (img_file, pred) in enumerate(zip(image_files, results), 1):
-        print(f"  {i:3}. {img_file.name:<30} → {pred}")
-    
     print("\n" + "="*60)

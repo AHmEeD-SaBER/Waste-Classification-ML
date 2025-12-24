@@ -70,33 +70,36 @@ def extract_cnn_features(image, model_name='mobilenetv2'):
     # Select model and preprocessing
     if model_name.lower() == 'mobilenetv2':
         if not hasattr(extract_cnn_features, 'mobilenet_model'):
-            print("Loading MobileNetV2 model (first time only)...")
+            print("Loading MobileNetV2 model")
             extract_cnn_features.mobilenet_model = MobileNetV2(
                 weights='imagenet',
                 include_top=False,
-                pooling='avg'
+                pooling='avg',
+                input_shape=(224, 224, 3)
             )
         model = extract_cnn_features.mobilenet_model
         image_preprocessed = preprocess_mobilenet(image_batch)
         
     elif model_name.lower() == 'resnet50':
         if not hasattr(extract_cnn_features, 'resnet_model'):
-            print("Loading ResNet50 model (first time only)...")
+            print("Loading ResNet50 model")
             extract_cnn_features.resnet_model = ResNet50(
                 weights='imagenet',
                 include_top=False,
-                pooling='avg'
+                pooling='avg',
+                input_shape=(224, 224, 3)
             )
         model = extract_cnn_features.resnet_model
         image_preprocessed = preprocess_resnet(image_batch)
         
     elif model_name.lower() == 'efficientnet':
         if not hasattr(extract_cnn_features, 'efficientnet_model'):
-            print("Loading EfficientNetB0 model (first time only)...")
+            print("Loading EfficientNetB0 model")
             extract_cnn_features.efficientnet_model = EfficientNetB0(
                 weights='imagenet',
                 include_top=False,
-                pooling='avg'
+                pooling='avg',
+                input_shape=(224, 224, 3)
             )
         model = extract_cnn_features.efficientnet_model
         image_preprocessed = preprocess_efficientnet(image_batch)
