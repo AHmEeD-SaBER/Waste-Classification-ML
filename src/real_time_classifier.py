@@ -1,22 +1,3 @@
-"""
-Real-time Waste Classification Application
-
-This script loads the trained model and provides:
-1. Real-time camera classification
-2. Single image classification
-3. Batch image classification from directory
-
-Usage:
-    # Camera mode
-    python real_time_classifier.py --mode camera
-    
-    # Single image
-    python real_time_classifier.py --mode image --path path/to/image.jpg
-    
-    # Directory of images
-    python real_time_classifier.py --mode directory --path path/to/images/
-"""
-
 import cv2
 import numpy as np
 import joblib
@@ -24,7 +5,6 @@ from pathlib import Path
 import argparse
 import sys
 
-# Add src to path for imports
 sys.path.append(str(Path(__file__).parent))
 from feature_extraction import extract_combined_features, extract_cnn_features
 
@@ -33,13 +13,6 @@ class WasteClassifier:
     """Waste classification inference engine"""
     
     def __init__(self, model_dir='models', use_cnn=True):
-        """
-        Initialize the classifier with trained model
-        
-        Args:
-            model_dir: Directory containing saved model files
-            use_cnn: Use CNN features (True) or handcrafted features (False)
-        """
         self.model_dir = Path(model_dir)
         self.use_cnn = use_cnn
         
@@ -58,18 +31,6 @@ class WasteClassifier:
         print("="*60)
     
     def classify_image(self, image, confidence_threshold=0.5):
-        """
-        Classify a single image
-        
-        Args:
-            image: BGR image (numpy array)
-            confidence_threshold: Minimum confidence for classification
-            
-        Returns:
-            prediction: Class name
-            confidence: Prediction confidence (0-1)
-            is_unknown: True if confidence below threshold
-        """
         # Resize to standard size
         image_resized = cv2.resize(image, (224, 224))
         
@@ -79,13 +40,10 @@ class WasteClassifier:
         else:
             features = extract_combined_features(image_resized)
         
-        # Reshape for sklearn (1 sample)
         features = features.reshape(1, -1)
         
-        # Scale features
         features_scaled = self.scaler.transform(features)
         
-        # Predict with probability
         proba = self.model.predict_proba(features_scaled)[0]
         class_id = self.model.predict(features_scaled)[0]
         confidence = proba.max()
@@ -97,17 +55,6 @@ class WasteClassifier:
             return self.class_names[class_id], confidence, False
     
     def classify_from_path(self, image_path, confidence_threshold=0.5, display=True):
-        """
-        Classify an image from file path
-        
-        Args:
-            image_path: Path to image file
-            confidence_threshold: Minimum confidence
-            display: Show image with prediction
-            
-        Returns:
-            prediction, confidence, is_unknown
-        """
         # Load image
         image = cv2.imread(str(image_path))
         if image is None:
@@ -125,16 +72,6 @@ class WasteClassifier:
         return prediction, confidence, is_unknown
     
     def classify_directory(self, directory_path, confidence_threshold=0.5):
-        """
-        Classify all images in a directory
-        
-        Args:
-            directory_path: Path to directory containing images
-            confidence_threshold: Minimum confidence
-            
-        Returns:
-            results: List of (filename, prediction, confidence, is_unknown)
-        """
         directory = Path(directory_path)
         image_extensions = ['.jpg', '.jpeg', '.png', '.bmp']
         
@@ -153,13 +90,6 @@ class WasteClassifier:
         return results
     
     def run_camera(self, confidence_threshold=0.5, camera_id=0):
-        """
-        Run real-time classification from camera
-        
-        Args:
-            confidence_threshold: Minimum confidence
-            camera_id: Camera device ID (default: 0)
-        """
         print("\n" + "="*60)
         print("STARTING CAMERA MODE")
         print("="*60)
@@ -250,7 +180,6 @@ class WasteClassifier:
 
 
 def main():
-    """Interactive menu for waste classification"""
     print("\n" + "="*60)
     print("       WASTE CLASSIFICATION SYSTEM")
     print("="*60)
